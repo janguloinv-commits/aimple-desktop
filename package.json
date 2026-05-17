@@ -1,0 +1,50 @@
+{
+  "name": "aimple-desktop",
+  "version": "1.0.0",
+  "main": "main.js",
+  "description": "AImple - Deal Intelligence Desktop App",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^41.6.1",
+    "electron-builder": "^25.1.1"
+  },
+  "build": {
+    "appId": "com.aimple.desktop",
+    "productName": "AImple",
+    "mac": {
+      "category": "public.app-category.business",
+      "target": ["dmg", "zip"],
+      "sign": false
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  },
+  "keywords": [
+    "ai",
+    "deal-intelligence",
+    "pe-vc"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2"
+  }
+}
