@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const { execSync } = require('child_process');
 const security = require('./security');
 const OllamaManager = require('./ollama-manager');
+const errorHandler = require('./error-handler');
 
 let mainWindow;
 let expressApp = null;
@@ -156,7 +157,7 @@ async function readFilesFromFolder(folderPath) {
 
 // Removed - now using OllamaManager class for secure Ollama operations
 
-// Setup Express endpoints with input validation
+// Setup Express endpoints with input validation and error handling
 function setupExpressEndpoints(app) {
   app.post('/api/query', async (req, res) => {
     try {
@@ -164,26 +165,27 @@ function setupExpressEndpoints(app) {
 
       // Validate question
       if (!question) {
-        return res.status(400).json({ error: 'Question is required' });
+        throw new errorHandler.ValidationError('Question is required', 'question');
       }
 
       let sanitizedQuestion;
       try {
         sanitizedQuestion = security.sanitizePrompt(question);
       } catch (error) {
-        return res.status(400).json({ error: error.message });
+        throw new errorHandler.ValidationError(error.message, 'question');
       }
 
       // Validate model if provided
       if (!security.isValidModel(model)) {
-        return res.status(400).json({
-          error: `Invalid model. Allowed models: ${security.ALLOWED_MODELS.join(', ')}`
-        });
+        throw new errorHandler.ValidationError(
+          `Invalid model. Allowed models: ${security.ALLOWED_MODELS.join(', ')}`,
+          'model'
+        );
       }
 
       // Validate files
       if (!files || !Array.isArray(files) || files.length === 0) {
-        return res.status(400).json({ error: 'No files provided' });
+        throw new errorHandler.ValidationError('No files provided', 'files');
       }
 
       // Build context from files
@@ -193,7 +195,8 @@ function setupExpressEndpoints(app) {
 
       // Call Ollama with timeout
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+      const QUERY_TIMEOUT = 60000; // 60 seconds
+      const timeout = setTimeout(() => controller.abort(), QUERY_TIMEOUT);
 
       try {
         const response = await fetch(`${ollamaManager.ollamaUrl}/api/generate`, {
@@ -215,7 +218,11 @@ Answer:`,
         });
 
         if (!response.ok) {
-          throw new Error(`Ollama error: ${response.statusText}`);
+          throw new errorHandler.OllamaError(
+            `Ollama API error: ${response.statusText}`,
+            response.status,
+            { ollama_status: response.status }
+          );
         }
 
         const data = await response.json();
@@ -229,18 +236,7 @@ Answer:`,
         clearTimeout(timeout);
       }
     } catch (error) {
-      console.error('Query error:', error);
-
-      // Differentiate error types
-      if (error.name === 'AbortError') {
-        return res.status(504).json({
-          error: 'Request timeout - Ollama took too long to respond',
-        });
-      }
-
-      res.status(500).json({
-        error: error.message || 'Failed to process query',
-      });
+      errorHandler.handleExpressError(error, res);
     }
   });
 }
@@ -278,36 +274,39 @@ ipcMain.handle('query-claude', async (event, { question, folderPath }) => {
   try {
     // Validate inputs
     if (!question) {
-      return { error: 'Question is required' };
+      throw new errorHandler.ValidationError('Question is required', 'question');
     }
 
     try {
       security.sanitizePrompt(question);
     } catch (error) {
-      return { error: error.message };
+      throw new errorHandler.ValidationError(error.message, 'question');
     }
 
     if (!folderPath) {
-      return { error: 'Folder path is required' };
+      throw new errorHandler.ValidationError('Folder path is required', 'folderPath');
     }
 
     try {
       security.validateFolderPath(folderPath);
     } catch (error) {
-      return { error: 'Invalid folder path' };
+      throw new errorHandler.ValidationError('Invalid folder path', 'folderPath');
     }
 
     const files = await readFilesFromFolder(folderPath);
 
     if (files.length === 0) {
-      return {
-        error: `No supported files found in folder. Supported: ${security.SUPPORTED_FILE_EXTENSIONS.join(', ')}`,
-      };
+      throw new errorHandler.ValidationError(
+        `No supported files found in folder. Supported: ${security.SUPPORTED_FILE_EXTENSIONS.join(', ')}`,
+        'folderPath',
+        { supported_extensions: security.SUPPORTED_FILE_EXTENSIONS }
+      );
     }
 
     // Send request to backend API with timeout
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000); // 120 second timeout
+    const BACKEND_TIMEOUT = 120000; // 120 seconds
+    const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT);
 
     try {
       const response = await fetch(`${BACKEND_URL}/api/query`, {
@@ -324,9 +323,10 @@ ipcMain.handle('query-claude', async (event, { question, folderPath }) => {
 
       if (!response.ok) {
         const errorData = await response.json();
-        return {
-          error: errorData.error || `Server error: ${response.status}`,
-        };
+        throw new errorHandler.NetworkError(
+          errorData.error || `Backend server error: ${response.status}`,
+          { http_status: response.status }
+        );
       }
 
       const data = await response.json();
@@ -338,12 +338,7 @@ ipcMain.handle('query-claude', async (event, { question, folderPath }) => {
       clearTimeout(timeout);
     }
   } catch (error) {
-    if (error.name === 'AbortError') {
-      return { error: 'Request timeout - took too long to process' };
-    }
-    return {
-      error: error.message || 'Failed to connect to backend server',
-    };
+    return errorHandler.handleIPCError(error);
   }
 });
 
