@@ -9,6 +9,7 @@ const { execSync } = require('child_process');
 const security = require('./security');
 const OllamaManager = require('./ollama-manager');
 const errorHandler = require('./error-handler');
+const logger = require('./logger');
 
 let mainWindow;
 let expressApp = null;
@@ -70,7 +71,7 @@ async function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0
             };
           }
         } catch (error) {
-          console.error(`Error processing ${file}:`, error.message);
+          logger.error(`Error processing ${file}`, error, { file });
           return null;
         }
       }));
@@ -80,7 +81,7 @@ async function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0
 
     return structure;
   } catch (error) {
-    console.error('Error exploring folder:', error);
+    logger.error('Error exploring folder', error);
     return { name: path.basename(folderPath), type: 'folder', path: folderPath, children: [], error: error.message };
   }
 }
@@ -110,7 +111,7 @@ async function readFilesFromFolder(folderPath) {
               try {
                 security.validatePath(validatedPath, path.relative(validatedPath, filePath));
               } catch (error) {
-                console.error(`Security: Skipping invalid path ${filePath}:`, error.message);
+                logger.logSecurityEvent('Path validation failure', { path: filePath, reason: error.message });
                 return null;
               }
 
@@ -129,12 +130,12 @@ async function readFilesFromFolder(folderPath) {
                     content: content.substring(0, 5000),
                   };
                 } catch (e) {
-                  console.log(`Could not read ${filePath}:`, e.message);
+                  logger.warn('Could not read file', e, { path: filePath });
                   return null;
                 }
               }
             } catch (error) {
-              console.error(`Error processing ${item}:`, error.message);
+              logger.error(`Error processing ${item}`, error, { item });
               return null;
             }
             return null;
@@ -143,14 +144,14 @@ async function readFilesFromFolder(folderPath) {
           files.push(...results.filter(r => r !== null));
         }
       } catch (error) {
-        console.error('Error walking directory:', error);
+        logger.error('Error walking directory', error);
       }
     }
 
     await walkDir(validatedPath);
     return files;
   } catch (error) {
-    console.error('Invalid folder path:', error.message);
+    logger.error('Invalid folder path', error);
     return [];
   }
 }
@@ -348,7 +349,7 @@ function startExpressServer() {
     setupExpressEndpoints(expressApp);
 
     server = expressApp.listen(BACKEND_PORT, () => {
-      console.log(`✅ Backend ready on ${BACKEND_URL}`);
+      logger.info('Backend server started', { port: BACKEND_PORT, url: BACKEND_URL });
       resolve();
     });
   });
@@ -370,7 +371,7 @@ function createWindow() {
 }
 
 app.on('ready', async () => {
-  console.log('🔄 Initializing AImple...');
+  logger.logStartup('1.0.0');
 
   // Start Express server
   await startExpressServer();
@@ -378,7 +379,7 @@ app.on('ready', async () => {
   // Start Ollama
   const ollamaOk = await ollamaManager.start();
   if (!ollamaOk) {
-    console.error('❌ Ollama not available. Install from https://ollama.ai');
+    logger.fatal('Ollama not available', null, { url: 'https://ollama.ai' });
     mainWindow?.destroy();
     app.quit();
     return;
@@ -389,7 +390,7 @@ app.on('ready', async () => {
 
   // Create window
   createWindow();
-  console.log('✅ AImple ready!');
+  logger.info('AImple initialized and ready', { status: 'ready' });
 });
 
 app.on('window-all-closed', () => {

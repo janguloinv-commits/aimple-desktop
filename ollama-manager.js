@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const { execSync, spawn } = require('child_process');
 const crypto = require('crypto');
+const logger = require('./logger');
 
 const OLLAMA_VERSION = '0.1.43'; // Pinned version for security
 const OLLAMA_CHECKSUMS = {
@@ -55,7 +56,7 @@ class OllamaManager {
       const zipPath = path.join(this.ollamaDir, 'ollama.zip');
       const tempExtractPath = path.join(this.ollamaDir, 'temp');
 
-      console.log('📦 Downloading Ollama binary...');
+      logger.logOllamaEvent('Downloading binary');
 
       // Use curl with explicit URL (no piping scripts)
       execSync(`curl -L -o "${zipPath}" "${downloadUrl}"`, { stdio: 'inherit' });
@@ -63,16 +64,16 @@ class OllamaManager {
       // Verify checksum if available
       const filename = path.basename(downloadUrl);
       if (OLLAMA_CHECKSUMS[filename]) {
-        console.log('🔒 Verifying checksum...');
+        logger.logOllamaEvent('Verifying checksum');
         const isValid = await this.verifyChecksum(zipPath, OLLAMA_CHECKSUMS[filename]);
         if (!isValid) {
           fs.unlinkSync(zipPath);
           throw new Error('Checksum verification failed - binary may be corrupted');
         }
-        console.log('✅ Checksum verified');
+        logger.logOllamaEvent('Checksum verified');
       }
 
-      console.log('📦 Extracting Ollama...');
+      logger.logOllamaEvent('Extracting binary');
       execSync(`unzip -q -o "${zipPath}" -d "${tempExtractPath}"`, { stdio: 'inherit' });
 
       // Move extracted binary to final location
@@ -89,10 +90,10 @@ class OllamaManager {
       // Clean up
       execSync(`rm -rf "${zipPath}" "${tempExtractPath}"`, { stdio: 'inherit' });
 
-      console.log('✅ Ollama installed securely');
+      logger.logOllamaEvent('Installation complete');
       return true;
     } catch (error) {
-      console.error('Failed to install Ollama:', error.message);
+      logger.error('Failed to install Ollama', error);
       // Clean up on failure
       try {
         execSync(`rm -f "${zipPath}"`, { stdio: 'ignore' });
@@ -103,11 +104,11 @@ class OllamaManager {
 
   async start() {
     if (await this.isRunning()) {
-      console.log('✅ Ollama already running');
+      logger.logOllamaEvent('Already running');
       return true;
     }
 
-    console.log('🚀 Starting Ollama...');
+    logger.logOllamaEvent('Starting service');
 
     try {
       // Check if ollama is available in PATH
@@ -138,7 +139,7 @@ class OllamaManager {
       // Wait for Ollama to be ready (max 30 seconds)
       for (let i = 0; i < 30; i++) {
         if (await this.isRunning()) {
-          console.log('✅ Ollama ready');
+          logger.logOllamaEvent('Ready for queries');
           return true;
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -146,7 +147,7 @@ class OllamaManager {
 
       throw new Error('Ollama failed to start within timeout');
     } catch (error) {
-      console.error('❌ Error starting Ollama:', error.message);
+      logger.error('Error starting Ollama', error);
       return false;
     }
   }
@@ -158,7 +159,7 @@ class OllamaManager {
       const hasModel = data.models?.some((m) => m.name.startsWith(modelName));
 
       if (!hasModel) {
-        console.log(`📦 Downloading ${modelName} model (first time)...`);
+        logger.logOllamaEvent(`Downloading model: ${modelName}`);
         const pullResponse = await fetch(`${this.ollamaUrl}/api/pull`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -170,12 +171,12 @@ class OllamaManager {
           throw new Error(`Failed to pull model: ${pullResponse.statusText}`);
         }
 
-        console.log(`✅ ${modelName} model ready`);
+        logger.logOllamaEvent(`Model ready: ${modelName}`);
       }
 
       return true;
     } catch (error) {
-      console.error(`Error ensuring model ${modelName}:`, error.message);
+      logger.error(`Error ensuring model ${modelName}`, error);
       return false;
     }
   }
