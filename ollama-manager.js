@@ -16,13 +16,52 @@ class OllamaManager {
     this.homeDir = os.homedir();
     this.ollamaDir = path.join(config.AIMPLE_HOME, 'ollama');
     this.ollamaPath = path.join(this.ollamaDir, 'ollama');
+
+    // Status cache
+    this.statusCache = {
+      isRunning: null,
+      timestamp: 0,
+    };
+  }
+
+  getCacheStatus() {
+    const now = Date.now();
+    if (this.statusCache.timestamp && (now - this.statusCache.timestamp) < config.CACHE_TTL) {
+      return this.statusCache.isRunning;
+    }
+    return null;
+  }
+
+  setCacheStatus(status) {
+    this.statusCache = {
+      isRunning: status,
+      timestamp: Date.now(),
+    };
   }
 
   async isRunning() {
+    // Check cache first
+    if (config.CACHE_ENABLED) {
+      const cached = this.getCacheStatus();
+      if (cached !== null) {
+        logger.debug('Ollama status from cache', { cached });
+        return cached;
+      }
+    }
+
     try {
       const response = await fetch(`${config.OLLAMA_URL}/api/tags`, { timeout: 2000 });
-      return response.ok;
-    } catch {
+      const status = response.ok;
+
+      if (config.CACHE_ENABLED) {
+        this.setCacheStatus(status);
+      }
+
+      return status;
+    } catch (error) {
+      if (config.CACHE_ENABLED) {
+        this.setCacheStatus(false);
+      }
       return false;
     }
   }
@@ -102,7 +141,17 @@ class OllamaManager {
     }
   }
 
+  invalidateCache() {
+    this.statusCache = {
+      isRunning: null,
+      timestamp: 0,
+    };
+  }
+
   async start() {
+    // Invalidate cache when trying to start
+    this.invalidateCache();
+
     if (await this.isRunning()) {
       logger.logOllamaEvent('Already running');
       return true;
