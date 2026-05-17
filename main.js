@@ -6,6 +6,7 @@ const express = require('express');
 const cors = require('cors');
 const { spawn } = require('child_process');
 const { execSync } = require('child_process');
+const security = require('./security');
 
 let mainWindow;
 let expressApp = null;
@@ -70,45 +71,57 @@ function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0) {
   }
 }
 
-// Función para leer archivos soportados
+// Función para leer archivos soportados con validación de seguridad
 function readFilesFromFolder(folderPath) {
-  const supportedExtensions = ['.pdf', '.txt', '.docx', '.doc', '.xlsx', '.xls', '.md', '.json', '.csv'];
   const files = [];
 
-  function walkDir(dir) {
-    try {
-      const items = fs.readdirSync(dir);
-      for (const item of items) {
-        if (item.startsWith('.')) continue;
+  try {
+    const validatedPath = security.validateFolderPath(folderPath);
 
-        const filePath = path.join(dir, item);
-        const stat = fs.statSync(filePath);
+    function walkDir(dir) {
+      try {
+        const items = fs.readdirSync(dir);
+        for (const item of items) {
+          if (item.startsWith('.')) continue;
 
-        if (stat.isDirectory()) {
-          walkDir(filePath);
-        } else {
-          const ext = path.extname(filePath).toLowerCase();
-          if (supportedExtensions.includes(ext)) {
+          const filePath = path.join(dir, item);
+
+          // Validate path to prevent traversal attacks
+          try {
+            security.validatePath(validatedPath, path.relative(validatedPath, filePath));
+          } catch (error) {
+            console.error(`Security: Skipping invalid path ${filePath}:`, error.message);
+            continue;
+          }
+
+          const stat = fs.statSync(filePath);
+
+          if (stat.isDirectory()) {
+            walkDir(filePath);
+          } else if (security.isSupportedFile(filePath)) {
             try {
               const content = fs.readFileSync(filePath, 'utf-8');
               files.push({
                 path: filePath,
                 name: item,
-                content: content.substring(0, 5000), // Limit size
+                content: content.substring(0, 5000),
               });
             } catch (e) {
               console.log(`Could not read ${filePath}:`, e.message);
             }
           }
         }
+      } catch (error) {
+        console.error('Error walking directory:', error);
       }
-    } catch (error) {
-      console.error('Error walking directory:', error);
     }
-  }
 
-  walkDir(folderPath);
-  return files;
+    walkDir(validatedPath);
+    return files;
+  } catch (error) {
+    console.error('Invalid folder path:', error.message);
+    return [];
+  }
 }
 
 // Check if Ollama is running
@@ -219,17 +232,33 @@ async function ensureModel() {
   }
 }
 
-// Setup Express endpoints
+// Setup Express endpoints with input validation
 function setupExpressEndpoints(app) {
   app.post('/api/query', async (req, res) => {
     try {
-      const { question, files } = req.body;
+      const { question, files, model = MODEL } = req.body;
 
+      // Validate question
       if (!question) {
         return res.status(400).json({ error: 'Question is required' });
       }
 
-      if (!files || files.length === 0) {
+      let sanitizedQuestion;
+      try {
+        sanitizedQuestion = security.sanitizePrompt(question);
+      } catch (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      // Validate model if provided
+      if (!security.isValidModel(model)) {
+        return res.status(400).json({
+          error: `Invalid model. Allowed models: ${security.ALLOWED_MODELS.join(', ')}`
+        });
+      }
+
+      // Validate files
+      if (!files || !Array.isArray(files) || files.length === 0) {
         return res.status(400).json({ error: 'No files provided' });
       }
 
@@ -238,37 +267,53 @@ function setupExpressEndpoints(app) {
         .map((file) => `[${file.path}]\n${file.content}`)
         .join('\n\n---\n\n');
 
-      // Call Ollama
-      const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: MODEL,
-          prompt: `You are an expert deal analyst for PE/VC funds. Analyze the provided documents and answer questions about deals, operations, and investments. Be specific and cite your sources.
+      // Call Ollama with timeout
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+
+      try {
+        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: model.toLowerCase(),
+            prompt: `You are an expert deal analyst for PE/VC funds. Analyze the provided documents and answer questions about deals, operations, and investments. Be specific and cite your sources.
 
 Documents:
 ${context}
 
-Question: ${question}
+Question: ${sanitizedQuestion}
 
 Answer:`,
-          stream: false,
-        }),
-      });
+            stream: false,
+          }),
+          signal: controller.signal,
+        });
 
-      if (!response.ok) {
-        throw new Error(`Ollama error: ${response.statusText}`);
+        if (!response.ok) {
+          throw new Error(`Ollama error: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        res.json({
+          answer: data.response || 'No response',
+          filesAnalyzed: files.length,
+          model: model.toLowerCase(),
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (error) {
+      console.error('Query error:', error);
+
+      // Differentiate error types
+      if (error.name === 'AbortError') {
+        return res.status(504).json({
+          error: 'Request timeout - Ollama took too long to respond',
+        });
       }
 
-      const data = await response.json();
-
-      res.json({
-        answer: data.response || 'No response',
-        filesAnalyzed: files.length,
-        model: MODEL,
-      });
-    } catch (error) {
-      console.error('Error:', error);
       res.status(500).json({
         error: error.message || 'Failed to process query',
       });
@@ -307,39 +352,71 @@ ipcMain.handle('select-folder', async () => {
 
 ipcMain.handle('query-claude', async (event, { question, folderPath }) => {
   try {
+    // Validate inputs
+    if (!question) {
+      return { error: 'Question is required' };
+    }
+
+    try {
+      security.sanitizePrompt(question);
+    } catch (error) {
+      return { error: error.message };
+    }
+
+    if (!folderPath) {
+      return { error: 'Folder path is required' };
+    }
+
+    try {
+      security.validateFolderPath(folderPath);
+    } catch (error) {
+      return { error: 'Invalid folder path' };
+    }
+
     const files = readFilesFromFolder(folderPath);
 
     if (files.length === 0) {
       return {
-        error: 'No supported files found in folder. Supported: PDF, TXT, DOCX, XLSX, MD, JSON, CSV',
+        error: `No supported files found in folder. Supported: ${security.SUPPORTED_FILE_EXTENSIONS.join(', ')}`,
       };
     }
 
-    // Send request to backend API
-    const response = await fetch(`${BACKEND_URL}/api/query`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        question,
-        files,
-      }),
-    });
+    // Send request to backend API with timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000); // 120 second timeout
 
-    if (!response.ok) {
-      const errorData = await response.json();
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/query`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question,
+          files,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        return {
+          error: errorData.error || `Server error: ${response.status}`,
+        };
+      }
+
+      const data = await response.json();
       return {
-        error: errorData.error || `Server error: ${response.status}`,
+        answer: data.answer,
+        filesAnalyzed: data.filesAnalyzed,
       };
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const data = await response.json();
-    return {
-      answer: data.answer,
-      filesAnalyzed: data.filesAnalyzed,
-    };
   } catch (error) {
+    if (error.name === 'AbortError') {
+      return { error: 'Request timeout - took too long to process' };
+    }
     return {
       error: error.message || 'Failed to connect to backend server',
     };
