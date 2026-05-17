@@ -31,14 +31,14 @@ function createExpressApp() {
   return app;
 }
 
-// Función para explorar carpetas recursivamente
-function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0) {
+// Explore folder structure asynchronously to prevent UI blocking
+async function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0) {
   if (currentDepth >= maxDepth) {
     return { name: path.basename(folderPath), type: 'folder', path: folderPath, children: [] };
   }
 
   try {
-    const files = fs.readdirSync(folderPath);
+    const files = await fs.promises.readdir(folderPath);
     const structure = {
       name: path.basename(folderPath),
       type: 'folder',
@@ -46,23 +46,35 @@ function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0) {
       children: [],
     };
 
-    for (const file of files) {
-      if (file.startsWith('.')) continue; // Skip hidden files
+    // Process files in parallel batches to improve performance
+    const batchSize = 10;
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize);
+      const results = await Promise.all(batch.map(async (file) => {
+        try {
+          if (file.startsWith('.')) return null; // Skip hidden files
 
-      const filePath = path.join(folderPath, file);
-      const stat = fs.statSync(filePath);
+          const filePath = path.join(folderPath, file);
+          const stat = await fs.promises.stat(filePath);
 
-      if (stat.isDirectory()) {
-        structure.children.push(exploreFolderStructure(filePath, maxDepth, currentDepth + 1));
-      } else {
-        structure.children.push({
-          name: file,
-          type: 'file',
-          path: filePath,
-          size: stat.size,
-          extension: path.extname(file),
-        });
-      }
+          if (stat.isDirectory()) {
+            return await exploreFolderStructure(filePath, maxDepth, currentDepth + 1);
+          } else {
+            return {
+              name: file,
+              type: 'file',
+              path: filePath,
+              size: stat.size,
+              extension: path.extname(file),
+            };
+          }
+        } catch (error) {
+          console.error(`Error processing ${file}:`, error.message);
+          return null;
+        }
+      }));
+
+      structure.children.push(...results.filter(r => r !== null));
     }
 
     return structure;
@@ -72,52 +84,69 @@ function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0) {
   }
 }
 
-// Función para leer archivos soportados con validación de seguridad
-function readFilesFromFolder(folderPath) {
+// Read files from folder asynchronously with security validation
+async function readFilesFromFolder(folderPath) {
   const files = [];
 
   try {
     const validatedPath = security.validateFolderPath(folderPath);
 
-    function walkDir(dir) {
+    async function walkDir(dir) {
       try {
-        const items = fs.readdirSync(dir);
-        for (const item of items) {
-          if (item.startsWith('.')) continue;
+        const items = await fs.promises.readdir(dir);
 
-          const filePath = path.join(dir, item);
-
-          // Validate path to prevent traversal attacks
-          try {
-            security.validatePath(validatedPath, path.relative(validatedPath, filePath));
-          } catch (error) {
-            console.error(`Security: Skipping invalid path ${filePath}:`, error.message);
-            continue;
-          }
-
-          const stat = fs.statSync(filePath);
-
-          if (stat.isDirectory()) {
-            walkDir(filePath);
-          } else if (security.isSupportedFile(filePath)) {
+        // Process files in parallel batches for efficiency
+        const batchSize = 10;
+        for (let i = 0; i < items.length; i += batchSize) {
+          const batch = items.slice(i, i + batchSize);
+          const results = await Promise.all(batch.map(async (item) => {
             try {
-              const content = fs.readFileSync(filePath, 'utf-8');
-              files.push({
-                path: filePath,
-                name: item,
-                content: content.substring(0, 5000),
-              });
-            } catch (e) {
-              console.log(`Could not read ${filePath}:`, e.message);
+              if (item.startsWith('.')) return null;
+
+              const filePath = path.join(dir, item);
+
+              // Validate path to prevent traversal attacks
+              try {
+                security.validatePath(validatedPath, path.relative(validatedPath, filePath));
+              } catch (error) {
+                console.error(`Security: Skipping invalid path ${filePath}:`, error.message);
+                return null;
+              }
+
+              const stat = await fs.promises.stat(filePath);
+
+              if (stat.isDirectory()) {
+                // Recursively walk subdirectories
+                await walkDir(filePath);
+                return null;
+              } else if (security.isSupportedFile(filePath)) {
+                try {
+                  const content = await fs.promises.readFile(filePath, 'utf-8');
+                  return {
+                    path: filePath,
+                    name: item,
+                    content: content.substring(0, 5000),
+                  };
+                } catch (e) {
+                  console.log(`Could not read ${filePath}:`, e.message);
+                  return null;
+                }
+              }
+            } catch (error) {
+              console.error(`Error processing ${item}:`, error.message);
+              return null;
             }
-          }
+            return null;
+          }));
+
+          files.push(...results.filter(r => r !== null));
         }
       } catch (error) {
         console.error('Error walking directory:', error);
       }
     }
 
-    walkDir(validatedPath);
+    await walkDir(validatedPath);
     return files;
   } catch (error) {
     console.error('Invalid folder path:', error.message);
@@ -237,7 +266,7 @@ ipcMain.handle('select-folder', async () => {
   }
 
   const folderPath = result.filePaths[0];
-  const structure = exploreFolderStructure(folderPath);
+  const structure = await exploreFolderStructure(folderPath);
 
   return {
     path: folderPath,
@@ -268,7 +297,7 @@ ipcMain.handle('query-claude', async (event, { question, folderPath }) => {
       return { error: 'Invalid folder path' };
     }
 
-    const files = readFilesFromFolder(folderPath);
+    const files = await readFilesFromFolder(folderPath);
 
     if (files.length === 0) {
       return {
