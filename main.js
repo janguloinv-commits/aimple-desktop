@@ -7,6 +7,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const { execSync } = require('child_process');
 const security = require('./security');
+const OllamaManager = require('./ollama-manager');
 
 let mainWindow;
 let expressApp = null;
@@ -14,7 +15,7 @@ let server = null;
 const BACKEND_PORT = 3001;
 const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
 const MODEL = 'orca-mini';
-const OLLAMA_URL = 'http://localhost:11434';
+const ollamaManager = new OllamaManager();
 
 // Create Express app for serving API
 function createExpressApp() {
@@ -124,113 +125,7 @@ function readFilesFromFolder(folderPath) {
   }
 }
 
-// Check if Ollama is running
-async function isOllamaRunning() {
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/tags`, { timeout: 2000 });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-// Start Ollama if not running
-async function startOllama() {
-  if (await isOllamaRunning()) {
-    console.log('✅ Ollama already running');
-    return true;
-  }
-
-  console.log('🚀 Starting Ollama...');
-  try {
-    // Try to find Ollama
-    try {
-      execSync('which ollama', { stdio: 'ignore' });
-    } catch {
-      // Ollama not found, try to install it
-      console.log('📦 Installing Ollama automatically...');
-
-      const homeDir = os.homedir();
-      const ollamaDir = path.join(homeDir, '.aimple', 'ollama');
-      const ollamaPath = path.join(ollamaDir, 'ollama');
-
-      // Check if we already downloaded it
-      if (!fs.existsSync(ollamaPath)) {
-        try {
-          // Create directory
-          if (!fs.existsSync(ollamaDir)) {
-            fs.mkdirSync(ollamaDir, { recursive: true });
-          }
-
-          // Download Ollama for Mac
-          console.log('⬇️ Downloading Ollama (this may take a moment)...');
-          const downloadUrl = 'https://ollama.ai/download/Ollama-darwin.zip';
-
-          // Use curl to download (built-in on macOS)
-          execSync(`curl -L -o /tmp/ollama.zip ${downloadUrl}`, { stdio: 'inherit' });
-
-          // Extract
-          console.log('📦 Extracting Ollama...');
-          execSync(`unzip -q -o /tmp/ollama.zip -d /tmp/`, { stdio: 'inherit' });
-
-          // Move to .aimple directory
-          execSync(`mv /tmp/Ollama.app/Contents/MacOS/ollama ${ollamaPath}`, { stdio: 'inherit' });
-          execSync(`chmod +x ${ollamaPath}`, { stdio: 'inherit' });
-
-          console.log('✅ Ollama installed');
-        } catch (error) {
-          console.error('Failed to auto-install Ollama:', error.message);
-          return false;
-        }
-      }
-
-      // Add to PATH
-      process.env.PATH = `${ollamaDir}:${process.env.PATH}`;
-    }
-
-    // Start Ollama
-    const ollamaProcess = spawn('ollama', ['serve'], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    ollamaProcess.unref();
-
-    // Wait for Ollama to start
-    for (let i = 0; i < 30; i++) {
-      if (await isOllamaRunning()) {
-        console.log('✅ Ollama ready');
-        return true;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  } catch (error) {
-    console.error('❌ Error with Ollama:', error.message);
-    return false;
-  }
-  return false;
-}
-
-// Ensure model exists
-async function ensureModel() {
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/tags`);
-    const data = await response.json();
-    const hasModel = data.models?.some((m) => m.name.startsWith(MODEL));
-
-    if (!hasModel) {
-      console.log(`📦 Downloading ${MODEL} model (first time)...`);
-      await fetch(`${OLLAMA_URL}/api/pull`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: MODEL, stream: false }),
-      });
-    }
-    return true;
-  } catch (error) {
-    console.error('Error with model:', error.message);
-    return false;
-  }
-}
+// Removed - now using OllamaManager class for secure Ollama operations
 
 // Setup Express endpoints with input validation
 function setupExpressEndpoints(app) {
@@ -272,7 +167,7 @@ function setupExpressEndpoints(app) {
       const timeout = setTimeout(() => controller.abort(), 60000); // 60 second timeout
 
       try {
-        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+        const response = await fetch(`${ollamaManager.ollamaUrl}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -457,7 +352,7 @@ app.on('ready', async () => {
   await startExpressServer();
 
   // Start Ollama
-  const ollamaOk = await startOllama();
+  const ollamaOk = await ollamaManager.start();
   if (!ollamaOk) {
     console.error('❌ Ollama not available. Install from https://ollama.ai');
     mainWindow?.destroy();
@@ -466,7 +361,7 @@ app.on('ready', async () => {
   }
 
   // Ensure model
-  await ensureModel();
+  await ollamaManager.ensureModel(MODEL);
 
   // Create window
   createWindow();
