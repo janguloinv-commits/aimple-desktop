@@ -10,13 +10,11 @@ const security = require('./security');
 const OllamaManager = require('./ollama-manager');
 const errorHandler = require('./error-handler');
 const logger = require('./logger');
+const config = require('./config');
 
 let mainWindow;
 let expressApp = null;
 let server = null;
-const BACKEND_PORT = 3001;
-const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
-const MODEL = 'orca-mini';
 const ollamaManager = new OllamaManager();
 
 // Create Express app for serving API
@@ -34,7 +32,7 @@ function createExpressApp() {
 }
 
 // Explore folder structure asynchronously to prevent UI blocking
-async function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0) {
+async function exploreFolderStructure(folderPath, maxDepth = config.MAX_FOLDER_DEPTH, currentDepth = 0) {
   if (currentDepth >= maxDepth) {
     return { name: path.basename(folderPath), type: 'folder', path: folderPath, children: [] };
   }
@@ -49,9 +47,8 @@ async function exploreFolderStructure(folderPath, maxDepth = 5, currentDepth = 0
     };
 
     // Process files in parallel batches to improve performance
-    const batchSize = 10;
-    for (let i = 0; i < files.length; i += batchSize) {
-      const batch = files.slice(i, i + batchSize);
+    for (let i = 0; i < files.length; i += config.FOLDER_TRAVERSE_BATCH_SIZE) {
+      const batch = files.slice(i, i + config.FOLDER_TRAVERSE_BATCH_SIZE);
       const results = await Promise.all(batch.map(async (file) => {
         try {
           if (file.startsWith('.')) return null; // Skip hidden files
@@ -98,9 +95,8 @@ async function readFilesFromFolder(folderPath) {
         const items = await fs.promises.readdir(dir);
 
         // Process files in parallel batches for efficiency
-        const batchSize = 10;
-        for (let i = 0; i < items.length; i += batchSize) {
-          const batch = items.slice(i, i + batchSize);
+        for (let i = 0; i < items.length; i += config.FOLDER_TRAVERSE_BATCH_SIZE) {
+          const batch = items.slice(i, i + config.FOLDER_TRAVERSE_BATCH_SIZE);
           const results = await Promise.all(batch.map(async (item) => {
             try {
               if (item.startsWith('.')) return null;
@@ -127,7 +123,7 @@ async function readFilesFromFolder(folderPath) {
                   return {
                     path: filePath,
                     name: item,
-                    content: content.substring(0, 5000),
+                    content: content.substring(0, config.MAX_FILE_CONTENT_SIZE),
                   };
                 } catch (e) {
                   logger.warn('Could not read file', e, { path: filePath });
@@ -162,7 +158,7 @@ async function readFilesFromFolder(folderPath) {
 function setupExpressEndpoints(app) {
   app.post('/api/query', async (req, res) => {
     try {
-      const { question, files, model = MODEL } = req.body;
+      const { question, files, model = config.OLLAMA_MODEL } = req.body;
 
       // Validate question
       if (!question) {
@@ -196,11 +192,10 @@ function setupExpressEndpoints(app) {
 
       // Call Ollama with timeout
       const controller = new AbortController();
-      const QUERY_TIMEOUT = 60000; // 60 seconds
-      const timeout = setTimeout(() => controller.abort(), QUERY_TIMEOUT);
+      const timeout = setTimeout(() => controller.abort(), config.OLLAMA_REQUEST_TIMEOUT);
 
       try {
-        const response = await fetch(`${ollamaManager.ollamaUrl}/api/generate`, {
+        const response = await fetch(`${config.OLLAMA_URL}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -306,11 +301,10 @@ ipcMain.handle('query-claude', async (event, { question, folderPath }) => {
 
     // Send request to backend API with timeout
     const controller = new AbortController();
-    const BACKEND_TIMEOUT = 120000; // 120 seconds
-    const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT);
+    const timeout = setTimeout(() => controller.abort(), config.OLLAMA_TIMEOUT);
 
     try {
-      const response = await fetch(`${BACKEND_URL}/api/query`, {
+      const response = await fetch(`${config.BACKEND_URL}/api/query`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -348,8 +342,8 @@ function startExpressServer() {
     expressApp = createExpressApp();
     setupExpressEndpoints(expressApp);
 
-    server = expressApp.listen(BACKEND_PORT, () => {
-      logger.info('Backend server started', { port: BACKEND_PORT, url: BACKEND_URL });
+    server = expressApp.listen(config.BACKEND_PORT, () => {
+      logger.info('Backend server started', { port: config.BACKEND_PORT, url: config.BACKEND_URL });
       resolve();
     });
   });
@@ -386,7 +380,7 @@ app.on('ready', async () => {
   }
 
   // Ensure model
-  await ollamaManager.ensureModel(MODEL);
+  await ollamaManager.ensureModel(config.OLLAMA_MODEL);
 
   // Create window
   createWindow();

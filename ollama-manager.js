@@ -4,6 +4,7 @@ const os = require('os');
 const { execSync, spawn } = require('child_process');
 const crypto = require('crypto');
 const logger = require('./logger');
+const config = require('./config');
 
 const OLLAMA_VERSION = '0.1.43'; // Pinned version for security
 const OLLAMA_CHECKSUMS = {
@@ -13,14 +14,13 @@ const OLLAMA_CHECKSUMS = {
 class OllamaManager {
   constructor() {
     this.homeDir = os.homedir();
-    this.ollamaDir = path.join(this.homeDir, '.aimple', 'ollama');
+    this.ollamaDir = path.join(config.AIMPLE_HOME, 'ollama');
     this.ollamaPath = path.join(this.ollamaDir, 'ollama');
-    this.ollamaUrl = 'http://localhost:11434';
   }
 
   async isRunning() {
     try {
-      const response = await fetch(`${this.ollamaUrl}/api/tags`, { timeout: 2000 });
+      const response = await fetch(`${config.OLLAMA_URL}/api/tags`, { timeout: 2000 });
       return response.ok;
     } catch {
       return false;
@@ -154,17 +154,17 @@ class OllamaManager {
 
   async ensureModel(modelName) {
     try {
-      const response = await fetch(`${this.ollamaUrl}/api/tags`);
+      const response = await fetch(`${config.OLLAMA_URL}/api/tags`);
       const data = await response.json();
       const hasModel = data.models?.some((m) => m.name.startsWith(modelName));
 
       if (!hasModel) {
         logger.logOllamaEvent(`Downloading model: ${modelName}`);
-        const pullResponse = await fetch(`${this.ollamaUrl}/api/pull`, {
+        const pullResponse = await fetch(`${config.OLLAMA_URL}/api/pull`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: modelName, stream: false }),
-          timeout: 600000 // 10 minutes for model download
+          timeout: config.OLLAMA_TIMEOUT
         });
 
         if (!pullResponse.ok) {

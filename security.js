@@ -1,6 +1,7 @@
 const path = require('path');
+const config = require('./config');
 
-const ALLOWED_MODELS = ['neural-chat', 'mistral', 'llama2', 'dolphin-mixtral'];
+const ALLOWED_MODELS = ['neural-chat', 'mistral', 'llama2', 'dolphin-mixtral', 'orca-mini'];
 const SUPPORTED_FILE_EXTENSIONS = ['.txt', '.pdf', '.docx', '.md', '.json'];
 
 function validatePath(basePath, requestedPath) {
